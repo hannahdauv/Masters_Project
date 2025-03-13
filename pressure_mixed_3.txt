@@ -1,0 +1,81 @@
+# Sample LAMMPS input script for thermal conductivity of solid Ar
+# with variable Lennard-Jones parameters
+
+units       real
+atom_style  atomic
+variable    T equal 300
+variable    V equal vol
+variable    dt equal 4.0
+variable    p equal 200     # correlation length
+variable    s equal 10      # sample interval
+variable    d equal $p*$s   # dump interval
+
+# Convert from LAMMPS real units to SI
+variable    kB equal 1.3806504e-23    # [J/K] Boltzmann
+variable    kCal2J equal 4186.0/6.02214e23
+variable    A2m equal 1.0e-10
+variable    fs2s equal 1.0e-15
+variable    convert equal ${kCal2J}*${kCal2J}/${fs2s}/${A2m}
+
+# Lennard-Jones parameters (epsilon and sigma) for different atom pairs
+variable    epsilon_1 equal 0.2381      # epsilon for type 1-1 in kcal/mol
+variable    sigma_1 equal 2.3835        # sigma for type 1-1 in angstroms
+
+variable    epsilon_2 equal 0.2381      # epsilon for type 2-2 in kcal/mol
+variable    sigma_2 equal 4.4265        # sigma for type 2-2 in angstroms
+
+variable    epsilon_12 equal 0.2381    # epsilon for type 1-2 in kcal/mol
+variable    sigma_12 equal 3.405       # sigma for type 1-2 in angstroms (geometric mean)
+
+# Setup problem
+boundary     p p p
+lattice      fcc 5.376 orient x 1 0 0 orient y 0 1 0 orient z 0 0 1
+region       box block 0 4 0 4 0 4
+create_box   2 box  # Create box with 2 atom types
+create_atoms 1 box basis 1 1 basis 2 2 basis 3 1 basis 4 2 # Assign atom types based on lattice basis
+mass         1 39.948
+mass         2 39.948
+
+pair_style   hybrid lj/cut 13.0 lj/cut 13.0 lj/cut 13.0
+pair_coeff   1 1 lj/cut 1 ${epsilon_1} ${sigma_1}  # Type 1-1 interaction
+pair_coeff   2 2 lj/cut 2 ${epsilon_2} ${sigma_2}  # Type 2-2 interaction
+pair_coeff   1 2 lj/cut 3 ${epsilon_12} ${sigma_12} # Type 1-2 interaction
+
+timestep     ${dt}
+thermo       $d
+
+# Equilibration and thermalization
+velocity     all create 300.0 102495 mom yes rot yes dist gaussian
+fix          NPT all npt temp $T $T 10 drag 0.2 iso 8000 8000 5000
+run          8000
+
+# Thermal conductivity calculation, switch to NVE if desired
+#unfix       NPT
+#fix         NVE all nve
+
+reset_timestep 0
+compute      myKE all ke/atom
+compute      myPE all pe/atom
+compute      myStress all stress/atom NULL virial
+compute      flux all heat/flux myKE myPE myStress
+variable     Jx equal c_flux[1]/vol
+variable     Jy equal c_flux[2]/vol
+variable     Jz equal c_flux[3]/vol
+fix          JJ all ave/correlate $s $p $d &
+             c_flux[1] c_flux[2] c_flux[3] type auto file J0Jt.dat ave running
+variable     scale equal ${convert}/${kB}/$T/$T/$V*$s*${dt}
+variable     k11 equal trap(f_JJ[3])*${scale}
+variable     k22 equal trap(f_JJ[4])*${scale}
+variable     k33 equal trap(f_JJ[5])*${scale}
+thermo_style custom step temp v_Jx v_Jy v_Jz v_k11 v_k22 v_k33 press vol
+
+dump         myDump all atom $d trajectory_sigma2.lammpstrj
+dump_modify  myDump sort id
+
+run          500000
+
+
+variable     k equal (v_k11+v_k22+v_k33)/3.0
+variable     ndens equal count(all)/vol
+print        "average conductivity: $k [W/mK] @ $T K, ${ndens} /A^3"
+print        "Volume of the system: $V"
